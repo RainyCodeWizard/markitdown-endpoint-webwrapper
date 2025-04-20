@@ -22,10 +22,10 @@ OPENAI_API_KEY=your_openai_key_here
 
 Start the server with:
 ```bash
-python index.py
+uvicorn index:app --host 0.0.0.0 --port 8080
 ```
 
-The server will run on `http://0.0.0.0:8080` with auto-reload enabled for development.
+The server will run on `http://127.1.1.1:8080` with auto-reload enabled for development.
 
 ## Deployment
 
