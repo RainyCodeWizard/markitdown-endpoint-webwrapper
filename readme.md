@@ -1,6 +1,31 @@
-# MarkItDown Endpoint
+# MarkItDown API Endpoint
 
-A FastAPI service that converts various file types to markdown text using OpenAI's GPT-4 Vision model and Microsoft's MarkItDown package. This service provides a simple API endpoint that can be integrated with no-code automation tools like n8n, making it perfect for building RAG (Retrieval Augmented Generation) systems in a no-code environment.
+FastAPI server for the MarkItDown service.
+
+## Installation
+
+1. Clone the repository
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Environment Variables
+
+Create a `.env` file with:
+```
+API_KEY=your_api_key_here
+OPENAI_API_KEY=your_openai_key_here
+```
+
+## Running the Server
+
+Start the server with:
+```bash
+python index.py
+```
+
+The server will run on `http://0.0.0.0:8080` with auto-reload enabled for development.
 
 ## Overview
 
@@ -45,30 +70,6 @@ All conversions preserve important document structure as Markdown, including:
 - OpenAI API key
 - FastAPI
 - python-dotenv
-
-## Installation
-
-1. Clone the repository
-2. Install dependencies:
-```bash
-pip install fastapi uvicorn python-dotenv openai markitdown
-```
-
-## Running the Server
-
-You can run the server in two ways:
-
-### Option 1: Using Python
-```bash
-python index.py
-```
-
-### Option 2: Using Uvicorn directly
-```bash
-uvicorn index:app --reload
-```
-
-The server will start on `http://localhost:8000`
 
 ## Environment Setup
 
