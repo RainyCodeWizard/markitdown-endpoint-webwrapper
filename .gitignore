@@ -46,6 +46,4 @@ coverage.xml
 # Project specific
 tmp/ 
 /__pycache__
-letter.JPG
-test.txt
 __pycache__/index.cpython-312.pyc
