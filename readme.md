@@ -1,6 +1,6 @@
 # MarkItDown API Endpoint
 
-FastAPI server for the MarkItDown service.
+FastAPI server providing a Wrapper for Microsoft MarkItDown 
 
 ## Installation
 
