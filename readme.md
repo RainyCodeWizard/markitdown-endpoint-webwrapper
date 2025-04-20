@@ -27,6 +27,52 @@ python index.py
 
 The server will run on `http://0.0.0.0:8080` with auto-reload enabled for development.
 
+## Deployment
+
+This is a standard FastAPI application that can be deployed to any Python hosting service. Here are some deployment options:
+
+### Local Development
+Run the server locally using the instructions in the "Running the Server" section above.
+
+### Cloud Deployment Options
+
+The service can be deployed to various cloud platforms, including:
+- Heroku
+- Google Cloud Run
+- AWS Lambda/EC2
+- Azure App Service
+- Leapcell
+- Any other Python hosting service that supports FastAPI
+
+#### Example: Leapcell Configuration
+If using Leapcell, these are the build settings:
+
+- **Framework Preset**: fastapi
+- **Branch**: main
+- **Root Directory**: ./
+- **Runtime**: Python (python3.11 debian)
+- **Build Command**: pip install -r requirements.txt
+- **Start Command**:uvicorn index:app --host 0.0.0.0 --port 8080
+- **Serving Port**: 8080
+
+Remember to configure your environment variables (API_KEY and OPENAI_API_KEY) in your chosen platform's dashboard.
+
+## API Usage
+
+### Converting Files to Markdown
+
+Send a POST request to the root endpoint `/` with:
+- Header: `API_KEY: your-endpoint-api-key`
+- Body: Form data with a `file` field containing your document
+
+Example using cURL:
+```bash
+curl -X POST \
+     -H "API_KEY: your-endpoint-api-key" \
+     -F "file=@your-file.jpg" \
+     "https://your-api-url/"
+```
+
 ## Overview
 
 This endpoint serves as a bridge between various document formats and text-based RAG systems. By converting files to markdown format, it enables:
@@ -92,32 +138,6 @@ This dual authentication approach ensures:
 - Protection against unauthorized usage and potential abuse
 - Separation of concerns between OpenAI authentication and endpoint access
 - Prevention of costly unauthorized OpenAI API usage
-
-## Deployment
-
-This API is designed to run on [Leapcell](https://leapcell.io). Follow these steps for deployment:
-
-1. Create a new Python project in Leapcell
-2. Upload your code files:
-   - `index.py`
-   - `requirements.txt`
-
-3. Configure Environment Variables in Leapcell:
-   - Go to your project settings
-   - Add the following environment variables:
-     ```
-     OPENAI_API_KEY=your-openai-api-key
-     API_KEY=your-custom-endpoint-authentication-key
-     ```
-
-4. Deploy your application
-
-Your API will be available at your assigned Leapcell domain: `https://[your-project-id].leapcell.dev`
-
-### Important Notes
-- Leapcell handles all server infrastructure
-- No need for local server configuration
-- Environment variables are managed in Leapcell dashboard
 
 ## Usage
 
