@@ -158,10 +158,13 @@ This API can be deployed using [Leapcell](https://leapcell.io). Follow these ste
      OPENAI_API_KEY=your-openai-api-key
      API_KEY=your-custom-endpoint-authentication-key
      ```
-
-4. Update the start command in Leapcell:
+3. Update the build command in Leapcell:
    ```bash
-   pip install -r requirements.txt && uvicorn index:app --host 0.0.0.0 --port 8080
+   pip install -r requirements.txt 
+   ```
+5. Update the start command in Leapcell:
+   ```bash
+   uvicorn index:app --host 0.0.0.0 --port 8080
    ```
 
 5. Deploy your application
