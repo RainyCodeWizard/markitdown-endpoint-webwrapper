@@ -5,7 +5,6 @@ services:
     environment:
       API_KEY: ${API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      PORT: 3000
     # If you want to persist data, uncomment and adjust the following:
     # volumes:
     #   - ./data:/app/data 
