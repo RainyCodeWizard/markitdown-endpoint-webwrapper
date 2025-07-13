@@ -1,8 +1,6 @@
 services:
   markitdown-endpoint:
     build: .
-    ports:
-      - "3000:3000"
     restart: unless-stopped
     environment:
       API_KEY: ${API_KEY}
