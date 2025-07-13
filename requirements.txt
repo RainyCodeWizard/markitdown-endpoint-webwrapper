@@ -1,4 +1,6 @@
-fastapi[standard]
-python-dotenv
+fastapi
+uvicorn
 openai
+python-dotenv
 markitdown[all] 
+python-multipart 

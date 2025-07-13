@@ -1,0 +1,8 @@
+services:
+  markitdown-endpoint:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped 

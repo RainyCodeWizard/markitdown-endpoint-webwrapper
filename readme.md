@@ -219,3 +219,30 @@ print(response.json()['result'])
    ```
 5. Add file content in Binary mode
 6. Connect to your next workflow step
+
+# Docker Usage
+
+## Build the Docker image
+```sh
+docker build -t markitdown-endpoint .
+```
+
+## Run with Docker Compose (recommended)
+1. Copy `.env.example` to `.env` and fill in your API keys.
+2. Run:
+```sh
+docker-compose up --build
+```
+
+## Run with Docker only
+```sh
+docker run --env-file .env -p 8080:8080 markitdown-endpoint
+```
+
+- The API will be available at `http://localhost:8080/` by default.
+- You can change the port by setting the `PORT` variable in your `.env` file and updating the Docker run/compose command accordingly.
+
+## Environment Variables
+- `API_KEY`: The key required for endpoint authentication.
+- `OPENAI_API_KEY`: Your OpenAI API key.
+- `PORT`: The port the API will run on (default 8080).
