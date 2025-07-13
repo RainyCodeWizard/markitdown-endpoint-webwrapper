@@ -1,8 +1,13 @@
 services:
   markitdown-endpoint:
     build: .
-    env_file:
-      - .env
     ports:
-      - "${PORT:-8080}:8080"
-    restart: unless-stopped 
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      API_KEY: ${API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PORT: 3000
+    # If you want to persist data, uncomment and adjust the following:
+    # volumes:
+    #   - ./data:/app/data 
