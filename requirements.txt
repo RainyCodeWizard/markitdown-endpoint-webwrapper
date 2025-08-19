@@ -5,3 +5,4 @@ python-dotenv
 markitdown[all] 
 python-multipart 
 pypdf>=4.2.0
+Pillow>=10.0.0

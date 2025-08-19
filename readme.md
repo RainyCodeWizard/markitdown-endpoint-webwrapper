@@ -126,21 +126,34 @@ All conversions preserve important document structure as Markdown, including:
 
 ### Enriched PDF Conversion (inline image descriptions)
 
-If you pass the query parameter `enrich=true` and upload a PDF, the service will:
+If you pass the query parameter `enrich_pdf=true` and upload a PDF, the service will:
 
 - Extract the original text per page
-- Render each PDF page to an image and generate an AI description for it using your Azure OpenAI deployment (e.g., GPT-4o)
-- Embed the page image as a data URL and place the generated description inline after it
+- Detect embedded images on each page and generate AI descriptions for images that contain substantive content using your Azure OpenAI deployment (e.g., GPT-4o)
+- By default, embed each qualifying image as a data URL and place the generated description inline after it
+- Control image embedding via the `include_images` query parameter:
+  - `include_images=true` (default): include original images + their descriptions
+  - `include_images=false`: include only the descriptions without embedding images
 
 This yields a Markdown document containing the original text plus image descriptions, useful for RAG pipelines.
 
-Example cURL (enriched):
+Example cURL (enriched with images, default):
 
 ```bash
 curl -X POST \
      -H "API_KEY: your-endpoint-api-key" \
      -F "file=@your-file.pdf" \
-     "http://localhost:8080/?enrich=true"
+     "http://localhost:8080/?enrich_pdf=true&include_images=true"
+
+Example cURL (enriched, descriptions only – no images embedded):
+
+```bash
+curl -X POST \
+     -H "API_KEY: your-endpoint-api-key" \
+     -F "file=@your-file.pdf" \
+     "http://localhost:8080/?enrich_pdf=true&include_images=false"
+```
+
 ```
 
 Notes:

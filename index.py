@@ -8,6 +8,13 @@ import os
 from dotenv import load_dotenv
 from pypdf import PdfReader
 from markitdown import MarkItDown
+from PIL import Image, ImageFile
+import io
+
+# Allow loading of truncated images and increase max pixel limit for large PDFs
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Set a reasonable limit (default is 178 million pixels = ~13k x 13k)
+Image.MAX_IMAGE_PIXELS = 500_000_000  # Allow up to ~22k x 22k pixels
 
 # Load environment variables
 load_dotenv()
@@ -23,7 +30,8 @@ async def convert_markdown(
     request: Request,
     api_key: str | None = Header(None, alias="API_KEY", description="API key for endpoint authentication"),
     file: UploadFile = File(None),
-    enrich: bool = Query(False, description="If true and input is a PDF, include inline image descriptions")
+    enrich_pdf: bool = Query(False, description="If true and input is a PDF, include inline image descriptions"),
+    include_images: bool = Query(True, description="When enrich_pdf=true for PDFs, include original images inline before their descriptions; if false, include only descriptions")
 ):
     # Validate endpoint API key
     expected_api_key = os.getenv('API_KEY')
@@ -94,12 +102,18 @@ async def convert_markdown(
         # If enrichment requested and input is a PDF, run enriched pipeline
         lower_name = os.path.basename(file_path).lower()
         request_id = str(hash)
-        logger.info("[%s] Received request enrich=%s file=%s content_type=%s", request_id, enrich, os.path.basename(file_path), request.headers.get("content-type"))
+        logger.info("[%s] Received request enrich_pdf=%s file=%s content_type=%s", request_id, enrich_pdf, os.path.basename(file_path), request.headers.get("content-type"))
         logger.info("[%s] Using Azure OpenAI endpoint=%s deployment=%s api_version=%s", request_id, azure_openai_endpoint, azure_openai_deployment, azure_openai_api_version)
 
-        if enrich and (lower_name.endswith(".pdf") or request.headers.get("content-type", "").startswith("application/pdf")):
-            logger.info("[%s] Running OPTIMIZED PDF conversion (image-only to LLM)", request_id)
-            text = convert_pdf_to_markdown_optimized(file_path, client, azure_openai_deployment, request_id=request_id)
+        if enrich_pdf and (lower_name.endswith(".pdf") or request.headers.get("content-type", "").startswith("application/pdf")):
+            logger.info("[%s] Running OPTIMIZED PDF conversion (image-only to LLM) include_images=%s", request_id, include_images)
+            text = convert_pdf_to_markdown_optimized(
+                file_path,
+                client,
+                azure_openai_deployment,
+                request_id=request_id,
+                include_images=include_images,
+            )
         else:
             # For Azure OpenAI, llm_model expects the deployment name
             md_instance = MarkItDown(llm_client=client, llm_model=azure_openai_deployment)
@@ -133,7 +147,7 @@ def _describe_image_azure(client: AzureOpenAI, deployment: str, image_b64: str, 
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Only if the image contains substantive, document-relevant information (e.g., diagrams, charts, tables, data/UI screenshots with context, photos with meaningful content, or any readable text), provide a concise markdown paragraph describing or transcribing it. If the image is decorative or not important (e.g., logos, icons, emojis, watermarks, backgrounds, page furniture, or dividers), reply exactly with SKIP and nothing else."},
+                        {"type": "text", "text": "If the image contains any text, information, data, or content (including posters, signs, charts, tables, diagrams, forms, screenshots, documents, or any readable material), extract and transcribe ALL visible text and information exactly word-for-word. Output only the raw extracted content without any introductory phrases like 'this image shows' or 'the image contains'. For non-text content like charts or diagrams, provide the exact data, values, labels, and structural information present. If the image is purely decorative (logos, icons, backgrounds, dividers) with no meaningful information, reply exactly with SKIP and nothing else."},
                         {"type": "image_url", "image_url": {"url": f"data:{image_mime};base64,{image_b64}"}},
                     ],
                 }
@@ -148,7 +162,7 @@ def _describe_image_azure(client: AzureOpenAI, deployment: str, image_b64: str, 
         return ""
 
 
-def convert_pdf_to_markdown_optimized(pdf_path: str, client: AzureOpenAI, deployment: str, *, request_id: str) -> str:
+def convert_pdf_to_markdown_optimized(pdf_path: str, client: AzureOpenAI, deployment: str, *, request_id: str, include_images: bool = True) -> str:
     reader = PdfReader(pdf_path)
     markdown_output: list[str] = []
 
@@ -167,27 +181,64 @@ def convert_pdf_to_markdown_optimized(pdf_path: str, client: AzureOpenAI, deploy
         # Extract and describe only embedded images (robust: scan XObjects and only accept JPEG/JP2)
         images_info = _extract_images_from_page(page)
         if images_info:
-            logger.info("[%s] Found %d images on page %d", request_id, len(images_info), page_num)
+            logger.info("[%s] Found %d extractable images on page %d", request_id, len(images_info), page_num)
+            processed_images = 0
+            skipped_images = 0
+            
             for j, (image_mime, image_bytes) in enumerate(images_info):
                 try:
-                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    logger.debug("[%s] Processing image %d/%d on page %d (%s, %d bytes)", 
+                               request_id, j + 1, len(images_info), page_num, image_mime, len(image_bytes))
+                    
+                    # Validate and potentially resize image before processing
+                    processed_bytes, processed_mime = _validate_and_resize_image_for_azure(
+                        image_bytes, image_mime, request_id, j + 1, page_num
+                    )
+                    if not processed_bytes:
+                        skipped_images += 1
+                        continue
+                    
+                    image_b64 = base64.b64encode(processed_bytes).decode("utf-8")
+                    # Update mime type to the processed format
+                    image_mime = processed_mime
                     description = _describe_image_azure(
                         client, deployment, image_b64, image_mime, request_id=request_id, page_index=i
                     )
+                    
                     # Skip invalid images (no description due to Azure 400 or other issues)
                     if not description:
                         logger.warning("[%s] Skipping image %d on page %d due to invalid data/description", request_id, j + 1, page_num)
+                        skipped_images += 1
                         continue
+                        
                     # Skip images the model tagged as non-important
                     desc_trimmed = description.strip()
                     if desc_trimmed.upper() == "SKIP" or desc_trimmed.lower().startswith("skip"):
-                        logger.info("[%s] Skipping non-important image %d on page %d", request_id, j + 1, page_num)
+                        logger.info("[%s] Azure OpenAI marked image %d on page %d as non-important (SKIP)", request_id, j + 1, page_num)
+                        skipped_images += 1
                         continue
-                    markdown_output.append(
-                        f"\n\n![Image {j+1} on Page {page_num}](data:{image_mime};base64,{image_b64})\n\n{description}"
-                    )
+                        
+                    # Image successfully processed
+                    processed_images += 1
+                    logger.debug("[%s] Generated description for image %d on page %d (%d chars)", 
+                               request_id, j + 1, page_num, len(description))
+                    
+                    if include_images:
+                        markdown_output.append(
+                            f"\n\n![Image {j+1} on Page {page_num}](data:{processed_mime};base64,{image_b64})\n\n{description}"
+                        )
+                    else:
+                        markdown_output.append(
+                            f"\n\n{description}"
+                        )
                 except Exception as e:
-                    logger.error("[%s] Failed to process image %d on page %d: %s", request_id, j + 1, page_num, e)
+                    logger.error("[%s] Failed to process image %d on page %d: %s", request_id, j + 1, page_num, e, exc_info=True)
+                    skipped_images += 1
+                    
+            logger.info("[%s] Page %d image processing complete: %d processed, %d skipped", 
+                       request_id, page_num, processed_images, skipped_images)
+        else:
+            logger.debug("[%s] No extractable images found on page %d", request_id, page_num)
 
     return "\n\n".join(markdown_output).strip()
 
@@ -206,18 +257,32 @@ def _extract_images_from_page(page) -> list[tuple[str, bytes]]:
     Skip others (e.g., FlateDecode, CCITTFaxDecode) to avoid complex wrapping/decoding.
     """
     results: list[tuple[str, bytes]] = []
+    total_xobjects = 0
+    image_xobjects = 0
+    supported_images = 0
+    unsupported_filters = set()
+    
     try:
         resources = page.get("/Resources")
         if not resources:
+            logger.debug("Page has no /Resources")
             return results
         xobjects = resources.get("/XObject")
         if not xobjects:
+            logger.debug("Page has no /XObject resources")
             return results
-        for _, obj in xobjects.items():
+            
+        total_xobjects = len(xobjects)
+        logger.debug(f"Found {total_xobjects} XObjects on page")
+        
+        for obj_name, obj in xobjects.items():
             try:
                 xobj = obj.get_object()
                 if xobj.get("/Subtype") != "/Image":
+                    logger.debug(f"XObject {obj_name} is not an image (subtype: {xobj.get('/Subtype')})")
                     continue
+                    
+                image_xobjects += 1
                 filters = xobj.get("/Filter")
                 if isinstance(filters, list):
                     filter_names = [str(f) for f in filters]
@@ -226,20 +291,245 @@ def _extract_images_from_page(page) -> list[tuple[str, bytes]]:
                 else:
                     filter_names = []
 
-                mime_type: str | None = None
-                if any("DCTDecode" in f for f in filter_names):
-                    mime_type = "image/jpeg"
-                elif any("JPXDecode" in f for f in filter_names):
-                    mime_type = "image/jp2"
-                else:
-                    # Unsupported without re-encoding
-                    continue
+                logger.debug(f"Image {obj_name} has filters: {filter_names}")
 
-                data: bytes = xobj.get_data()
-                if data:
-                    results.append((mime_type, data))
+                # Try to extract and convert image data
+                try:
+                    data: bytes = xobj.get_data()
+                    if not data:
+                        logger.warning(f"Image {obj_name} has no data")
+                        continue
+
+                    # Get image dimensions for validation
+                    width = xobj.get("/Width")
+                    height = xobj.get("/Height")
+                    logger.debug(f"Image {obj_name} dimensions: {width}x{height}")
+
+                    mime_type: str | None = None
+                    converted_data: bytes = data
+
+                    # Handle different image encodings
+                    if any("DCTDecode" in f for f in filter_names):
+                        # JPEG - can use directly
+                        mime_type = "image/jpeg"
+                    elif any("JPXDecode" in f for f in filter_names):
+                        # JPEG 2000 - can use directly
+                        mime_type = "image/jp2"
+                    elif any("FlateDecode" in f for f in filter_names):
+                        # PNG or other compressed format - convert to JPEG
+                        converted_data, mime_type = _convert_image_to_jpeg(data, width, height, "FlateDecode")
+                        if not converted_data:
+                            logger.debug(f"Failed to convert FlateDecode image {obj_name}")
+                            continue
+                    elif any("CCITTFaxDecode" in f for f in filter_names):
+                        # TIFF fax format - convert to JPEG
+                        converted_data, mime_type = _convert_image_to_jpeg(data, width, height, "CCITTFaxDecode")
+                        if not converted_data:
+                            logger.debug(f"Failed to convert CCITTFaxDecode image {obj_name}")
+                            continue
+                    else:
+                        # Try generic conversion for other formats
+                        try:
+                            converted_data, mime_type = _convert_image_to_jpeg(data, width, height, "Generic")
+                            if not converted_data:
+                                # Track unsupported filters for logging
+                                unsupported_filters.update(filter_names)
+                                logger.debug(f"Skipping image {obj_name} - unsupported filters: {filter_names}")
+                                continue
+                        except Exception:
+                            # Track unsupported filters for logging
+                            unsupported_filters.update(filter_names)
+                            logger.debug(f"Skipping image {obj_name} - unsupported filters: {filter_names}")
+                            continue
+
+                    supported_images += 1
+                    logger.debug(f"Successfully extracted image {obj_name} ({len(converted_data)} bytes, {mime_type})")
+                    results.append((mime_type, converted_data))
+
+                except Exception as conversion_exc:
+                    logger.debug(f"Failed to extract/convert image {obj_name}: {conversion_exc}")
+                    continue
             except Exception as inner_exc:
-                logging.warning("Failed extracting one XObject image: %s", inner_exc)
+                logger.warning("Failed extracting XObject image %s: %s", obj_name, inner_exc)
+                
+        # Summary logging
+        if image_xobjects > 0:
+            logger.info(f"Page summary: {total_xobjects} XObjects, {image_xobjects} images, {supported_images} supported, {image_xobjects - supported_images} skipped")
+            if unsupported_filters:
+                logger.info(f"Unsupported image filters found: {sorted(unsupported_filters)}")
+        else:
+            logger.debug("No image XObjects found on page")
+            
     except Exception as exc:
-        logging.warning("Failed scanning page XObjects for images: %s", exc)
+        logger.warning("Failed scanning page XObjects for images: %s", exc)
     return results
+
+
+def _convert_image_to_jpeg(image_data: bytes, width: int, height: int, format_type: str) -> tuple[bytes | None, str | None]:
+    """Convert various image formats to JPEG for Azure OpenAI compatibility.
+    
+    Returns tuple of (converted_bytes, mime_type) or (None, None) if conversion fails.
+    """
+    try:
+        if format_type == "FlateDecode":
+            # Try to interpret as PNG-like data
+            try:
+                # First try to load as a direct image
+                img = Image.open(io.BytesIO(image_data))
+            except Exception:
+                # If that fails, try to interpret as raw RGBA/RGB data
+                if not width or not height:
+                    return None, None
+                
+                # Try different bit depths and color modes
+                for mode, bytes_per_pixel in [("RGBA", 4), ("RGB", 3), ("L", 1)]:
+                    expected_size = width * height * bytes_per_pixel
+                    if len(image_data) >= expected_size:
+                        try:
+                            img = Image.frombytes(mode, (width, height), image_data[:expected_size])
+                            break
+                        except Exception:
+                            continue
+                else:
+                    logger.debug(f"Could not interpret FlateDecode image data (size: {len(image_data)}, expected for {width}x{height})")
+                    return None, None
+                    
+        elif format_type == "CCITTFaxDecode":
+            # TIFF fax format - create a black and white image
+            if not width or not height:
+                return None, None
+            try:
+                # Try to interpret as 1-bit data
+                img = Image.frombytes("1", (width, height), image_data)
+            except Exception:
+                logger.debug(f"Could not interpret CCITTFaxDecode image data")
+                return None, None
+                
+        else:  # Generic
+            try:
+                # Try to load as a standard image format
+                img = Image.open(io.BytesIO(image_data))
+            except Exception:
+                return None, None
+
+        # Convert to RGB if necessary (remove alpha channel, handle grayscale)
+        if img.mode in ("RGBA", "P"):
+            # Create white background for transparency
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            img = background
+        elif img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        # Validate image dimensions
+        if img.width < 10 or img.height < 10:
+            logger.debug(f"Image too small: {img.width}x{img.height}")
+            return None, None
+            
+        if img.width * img.height > 4096 * 4096:  # Reasonable size limit
+            logger.debug(f"Image too large: {img.width}x{img.height}")
+            return None, None
+
+        # Convert to JPEG
+        output_buffer = io.BytesIO()
+        img.save(output_buffer, format="JPEG", quality=85, optimize=True)
+        jpeg_data = output_buffer.getvalue()
+        
+        logger.debug(f"Successfully converted {format_type} image to JPEG ({len(jpeg_data)} bytes)")
+        return jpeg_data, "image/jpeg"
+        
+    except Exception as e:
+        logger.debug(f"Failed to convert {format_type} image: {e}")
+        return None, None
+
+
+def _validate_and_resize_image_for_azure(image_bytes: bytes, image_mime: str, request_id: str, image_num: int, page_num: int) -> tuple[bytes | None, str | None]:
+    """Validate and potentially resize image before sending to Azure OpenAI.
+    
+    Returns tuple of (processed_image_bytes, mime_type) or (None, None) if invalid.
+    """
+    # Check file size limits (Azure OpenAI has a 20MB limit, but we'll be more conservative)
+    MAX_SIZE_MB = 15
+    if len(image_bytes) > MAX_SIZE_MB * 1024 * 1024:
+        logger.warning("[%s] Skipping image %d on page %d - file too large (%d MB)", 
+                      request_id, image_num, page_num, len(image_bytes) // (1024 * 1024))
+        return None, None
+    
+    # Check minimum size (avoid tiny images that are likely artifacts)
+    MIN_SIZE_BYTES = 100
+    if len(image_bytes) < MIN_SIZE_BYTES:
+        logger.debug("[%s] Skipping image %d on page %d - file too small (%d bytes)", 
+                    request_id, image_num, page_num, len(image_bytes))
+        return None, None
+    
+    # Process and potentially resize image using PIL
+    try:
+        # Load image
+        img = Image.open(io.BytesIO(image_bytes))
+        original_size = (img.width, img.height)
+        
+        # Check minimum dimensions
+        if img.width < 10 or img.height < 10:
+            logger.debug("[%s] Skipping image %d on page %d - dimensions too small (%dx%d)", 
+                       request_id, image_num, page_num, img.width, img.height)
+            return None, None
+        
+        # Check aspect ratio to avoid extremely stretched images
+        aspect_ratio = max(img.width, img.height) / min(img.width, img.height)
+        if aspect_ratio > 50:  # More lenient than before
+            logger.debug("[%s] Skipping image %d on page %d - extreme aspect ratio (%.1f)", 
+                       request_id, image_num, page_num, aspect_ratio)
+            return None, None
+        
+        # Resize if dimensions are too large (common for vision APIs: 2048x2048 max)
+        MAX_DIMENSION = 2048
+        needs_resize = img.width > MAX_DIMENSION or img.height > MAX_DIMENSION
+        
+        if needs_resize:
+            # Calculate new size maintaining aspect ratio
+            scale_factor = min(MAX_DIMENSION / img.width, MAX_DIMENSION / img.height)
+            new_width = int(img.width * scale_factor)
+            new_height = int(img.height * scale_factor)
+            
+            logger.info("[%s] Resizing image %d on page %d from %dx%d to %dx%d (scale: %.2f)", 
+                       request_id, image_num, page_num, img.width, img.height, 
+                       new_width, new_height, scale_factor)
+            
+            # Resize with high quality
+            img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            img = img_resized
+        
+        # Convert to RGB if necessary (remove alpha channel, handle grayscale)
+        if img.mode in ("RGBA", "P"):
+            # Create white background for transparency
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            img = background
+        elif img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        
+        # Convert to JPEG for consistency
+        output_buffer = io.BytesIO()
+        img.save(output_buffer, format="JPEG", quality=85, optimize=True)
+        processed_bytes = output_buffer.getvalue()
+        processed_mime = "image/jpeg"
+        
+        if needs_resize:
+            logger.debug("[%s] Image %d on page %d processed: %s -> %s, %d -> %d bytes", 
+                        request_id, image_num, page_num, 
+                        f"{original_size[0]}x{original_size[1]}", f"{img.width}x{img.height}",
+                        len(image_bytes), len(processed_bytes))
+        else:
+            logger.debug("[%s] Image %d on page %d processed: %dx%d, %d bytes", 
+                        request_id, image_num, page_num, img.width, img.height, len(processed_bytes))
+        
+        return processed_bytes, processed_mime
+        
+    except Exception as e:
+        logger.warning("[%s] Skipping image %d on page %d - processing failed: %s", 
+                      request_id, image_num, page_num, e)
+        return None, None

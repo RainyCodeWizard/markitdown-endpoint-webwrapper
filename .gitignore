@@ -13,7 +13,7 @@ build/
 venv/
 env/
 .env/
-.env.default/
+.env.default
 .venv/
 ENV/
 
