@@ -4,3 +4,4 @@ openai
 python-dotenv
 markitdown[all] 
 python-multipart 
+pypdf>=4.2.0

@@ -4,7 +4,10 @@ services:
     restart: unless-stopped
     environment:
       API_KEY: ${API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT}
     # If you want to persist data, uncomment and adjust the following:
     # volumes:
     #   - ./data:/app/data 
