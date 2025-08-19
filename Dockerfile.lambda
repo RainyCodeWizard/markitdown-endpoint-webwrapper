@@ -1,0 +1,29 @@
+FROM public.ecr.aws/lambda/python:3.11
+
+# Environment
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_PREFER_BINARY=1
+
+# Optional: install ffmpeg (static) for broader media support.
+# If this fails due to network restrictions, you can remove this block.
+RUN yum install -y tar xz curl && \
+    curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    mkdir -p /opt/ffmpeg && tar -xJf /tmp/ffmpeg.tar.xz -C /opt/ffmpeg --strip-components=1 && \
+    ln -sf /opt/ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
+    ln -sf /opt/ffmpeg/ffprobe /usr/local/bin/ffprobe || true && \
+    yum clean all && rm -rf /var/cache/yum
+
+# Install Python dependencies
+COPY requirements.txt ./
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir --only-binary=:all: numpy pandas lxml && \
+    pip install --no-cache-dir --prefer-binary -r requirements.txt
+
+# Copy application code
+COPY . ./
+
+# Set the CMD to your handler (file.function)
+CMD ["index.handler"]
+
+

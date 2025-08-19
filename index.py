@@ -10,6 +10,7 @@ from pypdf import PdfReader
 from markitdown import MarkItDown
 from PIL import Image, ImageFile
 import io
+from mangum import Mangum
 
 # Allow loading of truncated images and increase max pixel limit for large PDFs
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -74,12 +75,22 @@ async def convert_markdown(
     # Prepare temp folder
     hash = uuid4()
     folder_path = f"/tmp/{hash}"
-    os.makedirs(folder_path, exist_ok=True)
+    try:
+        os.makedirs(folder_path, exist_ok=True)
+    except OSError as e:
+        logger.error("Failed to create temp directory in /tmp: %s", e)
+        raise HTTPException(status_code=500, detail="Unable to create temporary storage")
 
     try:
         if file is not None:
             # Standard multipart/form-data upload
-            file_path = f"{folder_path}/{file.filename}"
+            # Ensure we have a valid filename
+            filename = file.filename or f"upload_{hash}"
+            # Remove any path separators for security
+            filename = os.path.basename(filename)
+            if not filename or filename == "." or filename == "..":
+                filename = f"upload_{hash}"
+            file_path = f"{folder_path}/{filename}"
             with open(file_path, "wb") as f_out:
                 shutil.copyfileobj(file.file, f_out)
         else:
@@ -87,6 +98,10 @@ async def convert_markdown(
             # Try to get filename from headers, otherwise use a default
             content_type = request.headers.get("content-type", "application/octet-stream")
             filename = request.headers.get("x-filename", f"upload_{hash}")
+            # Remove any path separators for security
+            filename = os.path.basename(filename)
+            if not filename or filename == "." or filename == "..":
+                filename = f"upload_{hash}"
             file_path = f"{folder_path}/{filename}"
             body = await request.body()
             with open(file_path, "wb") as f_out:
@@ -128,6 +143,9 @@ async def convert_markdown(
     finally:
         if os.path.exists(folder_path):
             shutil.rmtree(folder_path)
+
+# AWS Lambda handler (via Mangum)
+handler = Mangum(app)
 
 if __name__ == "__main__":
     import uvicorn
