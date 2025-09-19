@@ -13,7 +13,9 @@ pip install -r requirements.txt
 
 ## Environment Variables
 
-Create a `.env` file with:
+Create a `.env` file with the required variables for your chosen AI provider:
+
+### For Azure OpenAI
 
 ```
 API_KEY=your_api_key_here
@@ -22,6 +24,23 @@ AZURE_OPENAI_ENDPOINT=https://your-azure-openai-resource.openai.azure.com
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
 AZURE_OPENAI_DEPLOYMENT=gpt-4o-deployment-name
 ```
+
+### For AWS Bedrock (Claude 3.5 Sonnet) - Default
+
+```
+API_KEY=your_api_key_here
+AWS_ACCESS_KEY_ID=your_aws_access_key_id
+AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
+AWS_REGION=us-east-1
+AWS_BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20240620-v1:0
+```
+
+**Note:** When using AWS Bedrock, ensure that:
+
+1. Your AWS credentials have permissions to access Amazon Bedrock
+2. You have requested access to Claude 3.5 Sonnet model in your AWS region
+3. The Claude 3.5 Sonnet model is available in your chosen AWS region
+4. `AWS_BEDROCK_MODEL_ID` is optional and defaults to `anthropic.claude-3-5-sonnet-20240620-v1:0`
 
 ## Running the Server
 
@@ -129,11 +148,14 @@ All conversions preserve important document structure as Markdown, including:
 If you pass the query parameter `enrich_pdf=true` and upload a PDF, the service will:
 
 - Extract the original text per page
-- Detect embedded images on each page and generate AI descriptions for images that contain substantive content using your Azure OpenAI deployment (e.g., GPT-4o)
+- Detect embedded images on each page and generate AI descriptions for images that contain substantive content using your chosen AI provider
 - By default, embed each qualifying image as a data URL and place the generated description inline after it
 - Control image embedding via the `include_images` query parameter:
   - `include_images=true` (default): include original images + their descriptions
   - `include_images=false`: include only the descriptions without embedding images
+- Choose your AI provider via the `model_provider` query parameter:
+  - `model_provider=aws_bedrock` (default): use AWS Bedrock with Claude 3.5 Sonnet
+  - `model_provider=azure_openai`: use Azure OpenAI (requires GPT-4o or similar multimodal deployment)
 
 This yields a Markdown document containing the original text plus image descriptions, useful for RAG pipelines.
 
@@ -154,11 +176,19 @@ curl -X POST \
      "http://localhost:8080/?enrich_pdf=true&include_images=false"
 ```
 
+Example cURL (using AWS Bedrock with Claude 3.5 Sonnet):
+
+```bash
+curl -X POST \
+     -H "API_KEY: your-endpoint-api-key" \
+     -F "file=@your-file.pdf" \
+     "http://localhost:8080/?enrich_pdf=true&model_provider=aws_bedrock"
 ```
 
 Notes:
 
-- Requires an Azure OpenAI multimodal-capable deployment (e.g., GPT-4o)
+- When using Azure OpenAI: Requires a multimodal-capable deployment (e.g., GPT-4o)
+- When using AWS Bedrock: Requires access to Claude 3.5 Sonnet model in your AWS region
 - For local development, `pdf2image` depends on Poppler being installed on your machine
   - macOS: `brew install poppler`
   - Linux (Debian/Ubuntu): `sudo apt-get install poppler-utils`
