@@ -11,6 +11,9 @@ from markitdown import MarkItDown
 from PIL import Image, ImageFile
 import io
 from mangum import Mangum
+import boto3
+import json
+from enum import Enum
 
 # Allow loading of truncated images and increase max pixel limit for large PDFs
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -22,6 +25,11 @@ load_dotenv()
 
 app = FastAPI()
 
+# Model providers enum
+class ModelProvider(str, Enum):
+    AZURE_OPENAI = "azure_openai"
+    AWS_BEDROCK = "aws_bedrock"
+
 # Minimal logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger("markitdown-endpoint")
@@ -32,7 +40,8 @@ async def convert_markdown(
     api_key: str | None = Header(None, alias="API_KEY", description="API key for endpoint authentication"),
     file: UploadFile = File(None),
     enrich_pdf: bool = Query(False, description="If true and input is a PDF, include inline image descriptions"),
-    include_images: bool = Query(True, description="When enrich_pdf=true for PDFs, include original images inline before their descriptions; if false, include only descriptions")
+    include_images: bool = Query(True, description="When enrich_pdf=true for PDFs, include original images inline before their descriptions; if false, include only descriptions"),
+    model_provider: ModelProvider = Query(ModelProvider.AWS_BEDROCK, description="AI model provider to use for image description")
 ):
     # Validate endpoint API key
     expected_api_key = os.getenv('API_KEY')
@@ -59,18 +68,50 @@ async def convert_markdown(
     if provided_api_key != expected_api_key:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
-    # Get Azure OpenAI configuration from environment variables
-    azure_openai_api_key = os.getenv('AZURE_OPENAI_API_KEY')
-    azure_openai_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
-    azure_openai_api_version = os.getenv('AZURE_OPENAI_API_VERSION', '2025-04-01-preview')
-    azure_openai_deployment = os.getenv('AZURE_OPENAI_DEPLOYMENT')
+    # Initialize AI client based on provider
+    if model_provider == ModelProvider.AZURE_OPENAI:
+        # Get Azure OpenAI configuration from environment variables
+        azure_openai_api_key = os.getenv('AZURE_OPENAI_API_KEY')
+        azure_openai_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+        azure_openai_api_version = os.getenv('AZURE_OPENAI_API_VERSION', '2025-04-01-preview')
+        azure_openai_deployment = os.getenv('AZURE_OPENAI_DEPLOYMENT')
 
-    if not azure_openai_api_key:
-        raise HTTPException(status_code=500, detail="AZURE_OPENAI_API_KEY not found in environment variables")
-    if not azure_openai_endpoint:
-        raise HTTPException(status_code=500, detail="AZURE_OPENAI_ENDPOINT not found in environment variables")
-    if not azure_openai_deployment:
-        raise HTTPException(status_code=500, detail="AZURE_OPENAI_DEPLOYMENT (deployment name) not found in environment variables")
+        if not azure_openai_api_key:
+            raise HTTPException(status_code=500, detail="AZURE_OPENAI_API_KEY not found in environment variables")
+        if not azure_openai_endpoint:
+            raise HTTPException(status_code=500, detail="AZURE_OPENAI_ENDPOINT not found in environment variables")
+        if not azure_openai_deployment:
+            raise HTTPException(status_code=500, detail="AZURE_OPENAI_DEPLOYMENT (deployment name) not found in environment variables")
+        
+        # Initialize Azure OpenAI client
+        ai_client = AzureOpenAI(
+            api_key=azure_openai_api_key,
+            azure_endpoint=azure_openai_endpoint,
+            api_version=azure_openai_api_version
+        )
+        model_name = azure_openai_deployment
+        
+    elif model_provider == ModelProvider.AWS_BEDROCK:
+        # Get AWS Bedrock configuration from environment variables
+        aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+        aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        aws_region = os.getenv('AWS_REGION', 'us-east-1')
+        bedrock_model_id = os.getenv('AWS_BEDROCK_MODEL_ID', 'anthropic.claude-3-5-sonnet-20240620-v1:0')
+        
+        if not aws_access_key_id or not aws_secret_access_key:
+            raise HTTPException(status_code=500, detail="AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set for Bedrock")
+        
+        # Initialize Bedrock client
+        ai_client = boto3.client(
+            'bedrock-runtime',
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            region_name=aws_region
+        )
+        model_name = bedrock_model_id
+    
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported model provider: {model_provider}")
 
     # Prepare temp folder
     hash = uuid4()
@@ -107,33 +148,43 @@ async def convert_markdown(
             with open(file_path, "wb") as f_out:
                 f_out.write(body)
 
-        # Initialize Azure OpenAI client
-        client = AzureOpenAI(
-            api_key=azure_openai_api_key,
-            azure_endpoint=azure_openai_endpoint,
-            api_version=azure_openai_api_version
-        )
+        # AI client is already initialized above based on provider
 
         # If enrichment requested and input is a PDF, run enriched pipeline
         lower_name = os.path.basename(file_path).lower()
         request_id = str(hash)
-        logger.info("[%s] Received request enrich_pdf=%s file=%s content_type=%s", request_id, enrich_pdf, os.path.basename(file_path), request.headers.get("content-type"))
-        logger.info("[%s] Using Azure OpenAI endpoint=%s deployment=%s api_version=%s", request_id, azure_openai_endpoint, azure_openai_deployment, azure_openai_api_version)
+        logger.info("[%s] Received request enrich_pdf=%s file=%s content_type=%s provider=%s", 
+                   request_id, enrich_pdf, os.path.basename(file_path), request.headers.get("content-type"), model_provider.value)
+        
+        if model_provider == ModelProvider.AZURE_OPENAI:
+            logger.info("[%s] Using Azure OpenAI endpoint=%s deployment=%s api_version=%s", 
+                       request_id, azure_openai_endpoint, azure_openai_deployment, azure_openai_api_version)
+        else:
+            logger.info("[%s] Using AWS Bedrock model=%s region=%s", 
+                       request_id, bedrock_model_id, aws_region)
 
         if enrich_pdf and (lower_name.endswith(".pdf") or request.headers.get("content-type", "").startswith("application/pdf")):
             logger.info("[%s] Running OPTIMIZED PDF conversion (image-only to LLM) include_images=%s", request_id, include_images)
             text = convert_pdf_to_markdown_optimized(
                 file_path,
-                client,
-                azure_openai_deployment,
+                ai_client,
+                model_name,
+                model_provider,
                 request_id=request_id,
                 include_images=include_images,
             )
         else:
-            # For Azure OpenAI, llm_model expects the deployment name
-            md_instance = MarkItDown(llm_client=client, llm_model=azure_openai_deployment)
-            result = md_instance.convert(file_path)
-            text = result.text_content
+            # Standard MarkItDown conversion
+            if model_provider == ModelProvider.AZURE_OPENAI:
+                # For Azure OpenAI, llm_model expects the deployment name
+                md_instance = MarkItDown(llm_client=ai_client, llm_model=model_name)
+                result = md_instance.convert(file_path)
+                text = result.text_content
+            else:
+                # For Bedrock, MarkItDown may not support it directly, use basic conversion
+                md_instance = MarkItDown()
+                result = md_instance.convert(file_path)
+                text = result.text_content
 
         return {"result": text}
 
@@ -180,7 +231,59 @@ def _describe_image_azure(client: AzureOpenAI, deployment: str, image_b64: str, 
         return ""
 
 
-def convert_pdf_to_markdown_optimized(pdf_path: str, client: AzureOpenAI, deployment: str, *, request_id: str, include_images: bool = True) -> str:
+def _describe_image_bedrock(client, model_id: str, image_b64: str, image_mime: str, *, request_id: str, page_index: int) -> str:
+    try:
+        # Prepare the message for Claude 3.5 Sonnet
+        message = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "If the image contains any text, information, data, or content (including posters, signs, charts, tables, diagrams, forms, screenshots, documents, or any readable material), extract and transcribe ALL visible text and information exactly word-for-word. Output only the raw extracted content without any introductory phrases like 'this image shows' or 'the image contains'. For non-text content like charts or diagrams, provide the exact data, values, labels, and structural information present. If the image is purely decorative (logos, icons, backgrounds, dividers) with no meaningful information, reply exactly with SKIP and nothing else."
+                },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image_mime,
+                        "data": image_b64
+                    }
+                }
+            ]
+        }
+        
+        # Prepare the request body for Bedrock
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4000,
+            "temperature": 0.2,
+            "messages": [message]
+        }
+        
+        # Invoke the model
+        response = client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(body)
+        )
+        
+        # Parse the response
+        response_body = json.loads(response['body'].read())
+        content = response_body.get('content', [])
+        
+        if content and len(content) > 0:
+            text_content = content[0].get('text', '').strip()
+            logger.info("[%s] Bedrock image description success for page %s", request_id, page_index + 1)
+            return text_content
+        else:
+            logger.warning("[%s] Bedrock returned empty content for page %s", request_id, page_index + 1)
+            return ""
+            
+    except Exception as exc:
+        logger.error("[%s] Bedrock image description failed for page %s: %s", request_id, page_index + 1, exc, exc_info=True)
+        return ""
+
+
+def convert_pdf_to_markdown_optimized(pdf_path: str, client, model_name: str, model_provider: ModelProvider, *, request_id: str, include_images: bool = True) -> str:
     reader = PdfReader(pdf_path)
     markdown_output: list[str] = []
 
@@ -219,9 +322,19 @@ def convert_pdf_to_markdown_optimized(pdf_path: str, client: AzureOpenAI, deploy
                     image_b64 = base64.b64encode(processed_bytes).decode("utf-8")
                     # Update mime type to the processed format
                     image_mime = processed_mime
-                    description = _describe_image_azure(
-                        client, deployment, image_b64, image_mime, request_id=request_id, page_index=i
-                    )
+                    
+                    # Call appropriate description function based on provider
+                    if model_provider == ModelProvider.AZURE_OPENAI:
+                        description = _describe_image_azure(
+                            client, model_name, image_b64, image_mime, request_id=request_id, page_index=i
+                        )
+                    elif model_provider == ModelProvider.AWS_BEDROCK:
+                        description = _describe_image_bedrock(
+                            client, model_name, image_b64, image_mime, request_id=request_id, page_index=i
+                        )
+                    else:
+                        logger.error("[%s] Unsupported model provider: %s", request_id, model_provider)
+                        continue
                     
                     # Skip invalid images (no description due to Azure 400 or other issues)
                     if not description:
@@ -232,7 +345,7 @@ def convert_pdf_to_markdown_optimized(pdf_path: str, client: AzureOpenAI, deploy
                     # Skip images the model tagged as non-important
                     desc_trimmed = description.strip()
                     if desc_trimmed.upper() == "SKIP" or desc_trimmed.lower().startswith("skip"):
-                        logger.info("[%s] Azure OpenAI marked image %d on page %d as non-important (SKIP)", request_id, j + 1, page_num)
+                        logger.info("[%s] AI marked image %d on page %d as non-important (SKIP)", request_id, j + 1, page_num)
                         skipped_images += 1
                         continue
                         
